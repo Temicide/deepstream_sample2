@@ -1,4 +1,4 @@
-from __future__ import annotations
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -43,7 +43,7 @@ def detect_two_tone(
     s_channel: np.ndarray,
     v_channel: np.ndarray,
     valid_mask: np.ndarray,
-) -> str | None:
+) -> Optional[str]:
     edges = cv2.Canny(v_channel, 50, 150)
     edges = cv2.bitwise_and(edges, edges, mask=valid_mask.astype(np.uint8) * 255)
 
