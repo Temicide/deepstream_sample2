@@ -1,10 +1,10 @@
 # แก้ RTSP URL ให้ตรงกับกล้องของคุณ
 RTSP_URLS = [
-    "rtsp://user:pass@192.168.1.101:554/stream1",
-    "rtsp://user:pass@192.168.1.102:554/stream1",
-    "rtsp://user:pass@192.168.1.103:554/stream1",
-    "rtsp://user:pass@192.168.1.104:554/stream1",
-    "rtsp://user:pass@192.168.1.105:554/stream1",
+    "rtsp://10.0.11.153:8554/cctv06",
+    "rtsp://10.0.11.153:8554/cctv07",
+    "rtsp://10.0.11.153:8554/cctv08",
+    "rtsp://10.0.11.153:8554/cctv09",
+    "rtsp://10.0.11.153:8554/cctv10",
 ]
 
 # Pipeline นี้ออกแบบให้รับได้สูงสุด 5 RTSP sources
