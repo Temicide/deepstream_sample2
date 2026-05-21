@@ -42,7 +42,7 @@ YOLO_NETWORK_MODE = 2  # 0=FP32, 1=INT8, 2=FP16
 YOLO_CLUSTER_MODE = 2  # YOLOv8/v11 raw output: 2, YOLOv10/v26 post-NMS: 4
 YOLO_CONFIDENCE_THRESHOLD = 0.25
 YOLO_NMS_IOU_THRESHOLD = 0.45
-YOLO_CUSTOM_LIB_PATH = "../nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so"  # เช่น ./libnvdsinfer_custom_impl_Yolo.so
+YOLO_CUSTOM_LIB_PATH = "nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so"  # เช่น ./libnvdsinfer_custom_impl_Yolo.so
 YOLO_PARSE_BBOX_FUNC = "NvDsInferParseYolo"  # เช่น NvDsInferParseYolo
 YOLO_OUTPUT_BLOB_NAMES = "output0"  # optional, ใช้เมื่อ parser/model ต้องระบุ output layer
 

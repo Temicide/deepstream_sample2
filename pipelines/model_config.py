@@ -76,7 +76,7 @@ def ensure_primary_infer_config() -> str:
     ]
 
     if YOLO_CUSTOM_LIB_PATH.strip():
-        lines.append(f"custom-lib-path={YOLO_CUSTOM_LIB_PATH}")
+        lines.append(f"custom-lib-path={abs_project_path(YOLO_CUSTOM_LIB_PATH)}")
     if YOLO_PARSE_BBOX_FUNC.strip():
         lines.append(f"parse-bbox-func-name={YOLO_PARSE_BBOX_FUNC}")
     if YOLO_OUTPUT_BLOB_NAMES.strip():
