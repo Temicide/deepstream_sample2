@@ -2,8 +2,6 @@
 __pycache__/
 *.py[cod]
 
-.venv/
-venv/
 env/
 
 .agents/
@@ -13,8 +11,4 @@ skills-lock.json
 *.o
 *.so
 *.engine
-
-# Model artifacts should be downloaded/exported locally.
-models/*.onnx
-models/*.pt
 
