@@ -8,11 +8,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any
 
+import cv2
+import numpy as np
+
 import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 import pyds
+
+import vehicle_color_rule
 
 from config import (
     DETECTION_MIN_CONFIDENCE,
@@ -32,8 +37,9 @@ from config import (
     TRACKER_HEIGHT,
     TRACKER_LIB_FILE,
     TRACKER_WIDTH,
+    VEHICLE_CLASS_IDS,
 )
-from pipelines.common import BaseDeepStreamPipeline, make_element, set_optional_property
+from pipelines.common import BaseDeepStreamPipeline, encode_jpeg, make_element, set_optional_property
 from pipelines.model_config import abs_project_path, ensure_primary_infer_config
 
 
@@ -137,6 +143,10 @@ class DetectPipeline(BaseDeepStreamPipeline):
             DETECTION_POST_INTERVAL_SEC,
         )
         self._tracker_enabled = TRACKER_ENABLE
+        self._cam_color_lock = threading.Lock()
+        self._cam_color_queue: Dict[int, Dict] = {}
+        self._cam_color_enriched: Dict[int, tuple] = {}
+        self._color_cycle = 0
 
     def _create_tracker(self):
         tracker = make_element("nvtracker", "object-tracker")
@@ -337,6 +347,9 @@ class DetectPipeline(BaseDeepStreamPipeline):
         if not batch_meta:
             return Gst.PadProbeReturn.OK
 
+        self._color_cycle += 1
+        cycle = self._color_cycle
+
         now = time.time()
         raw_data_batch = {"data": []}
         result = {
@@ -365,6 +378,8 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 "objects": [],
             }
 
+            cam_entries = []
+
             l_obj = frame_meta.obj_meta_list
             while l_obj is not None:
                 try:
@@ -375,6 +390,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 rect = obj_meta.rect_params
                 confidence = float(obj_meta.confidence)
                 tracker_confidence = float(getattr(obj_meta, "tracker_confidence", -1.0))
+                obj_class_id = int(obj_meta.class_id)
                 if self._should_skip_object(confidence):
                     try:
                         l_obj = l_obj.next
@@ -387,7 +403,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 try:
                     label = obj_meta.obj_label
                 except Exception:
-                    label = str(obj_meta.class_id)
+                    label = str(obj_class_id)
 
                 bbox = {
                     "left": float(rect.left),
@@ -406,7 +422,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 )
 
                 cam_result["objects"].append({
-                    "class_id": int(obj_meta.class_id),
+                    "class_id": obj_class_id,
                     "label": label,
                     "confidence": output_confidence,
                     "detector_confidence": confidence,
@@ -421,7 +437,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
                         "height": bbox["height"] / max(1, MUX_HEIGHT),
                     },
                 })
-                raw_data_batch["data"].append({
+                raw_entry = {
                     "uuid": detection_uuid,
                     "timestamp": self._format_timestamp(now),
                     "type": label,
@@ -434,12 +450,24 @@ class DetectPipeline(BaseDeepStreamPipeline):
                     "camera_id": f"cam{camera_id + 1}",
                     "jetson_id": JETSON_ID,
                     "track_id": track_id,
+                }
+                raw_data_batch["data"].append(raw_entry)
+                cam_entries.append({
+                    "class_id": obj_class_id,
+                    "bbox": bbox,
+                    "raw_entry": raw_entry,
                 })
 
                 try:
                     l_obj = l_obj.next
                 except StopIteration:
                     break
+
+            with self._cam_color_lock:
+                self._cam_color_queue[camera_id] = {
+                    "cycle": cycle,
+                    "entries": cam_entries,
+                }
 
             result["cameras"][cam_key] = cam_result
 
@@ -451,8 +479,6 @@ class DetectPipeline(BaseDeepStreamPipeline):
         with self._det_lock:
             self._detections = result
 
-        if raw_data_batch["data"]:
-            self._publisher.publish_latest(raw_data_batch)
         return Gst.PadProbeReturn.OK
 
     def _osd_sink_pad_buffer_probe(self, pad, info, u_data):
@@ -571,6 +597,102 @@ class DetectPipeline(BaseDeepStreamPipeline):
         if object_id_int == 0 and not allow_zero:
             return ""
         return str(object_id_int)
+
+    def _on_camera_sample(self, sink, cam_idx: int):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.ERROR
+
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        structure = caps.get_structure(0)
+        width = structure.get_value("width")
+        height = structure.get_value("height")
+
+        success, map_info = buf.map(Gst.MapFlags.READ)
+        if not success:
+            return Gst.FlowReturn.ERROR
+
+        try:
+            arr = np.frombuffer(map_info.data, dtype=np.uint8)
+            expected = height * width * 3
+            if arr.size < expected:
+                print(f"[WARN] Cam{cam_idx} buffer too small: got={arr.size}, expected={expected}")
+                return Gst.FlowReturn.OK
+
+            frame = arr[:expected].reshape((height, width, 3)).copy()
+
+            self._process_camera_colors(cam_idx, frame)
+
+            fps = self._fps_meters[f"cam{cam_idx}"].tick()
+            frame = self._overlay_fps(frame, fps, f"Cam{cam_idx + 1}")
+            jpg = encode_jpeg(frame)
+            if jpg:
+                self.camera_frames[cam_idx].set_jpeg(jpg)
+
+            self._try_publish_enriched_batch()
+
+        except Exception as e:
+            print(f"[ERROR] cam{cam_idx} appsink failed:", repr(e))
+        finally:
+            buf.unmap(map_info)
+
+        return Gst.FlowReturn.OK
+
+    def _process_camera_colors(self, cam_idx: int, frame_bgr: np.ndarray):
+        with self._cam_color_lock:
+            cam_data = self._cam_color_queue.pop(cam_idx, None)
+
+        if cam_data is None:
+            return
+
+        entries = cam_data.get("entries", [])
+        enriched = []
+        for entry in entries:
+            raw_entry = entry["raw_entry"]
+            obj_class_id = entry["class_id"]
+
+            if obj_class_id in VEHICLE_CLASS_IDS:
+                bbox = entry["bbox"]
+                x1 = max(0, int(bbox["left"]))
+                y1 = max(0, int(bbox["top"]))
+                x2 = min(frame_bgr.shape[1], x1 + int(bbox["width"]))
+                y2 = min(frame_bgr.shape[0], y1 + int(bbox["height"]))
+
+                if x2 > x1 and y2 > y1:
+                    crop = frame_bgr[y1:y2, x1:x2]
+                    color = vehicle_color_rule.detect_color(crop)
+                else:
+                    color = "Unknown"
+                raw_entry["color"] = color
+
+            enriched.append(raw_entry)
+
+        with self._cam_color_lock:
+            self._cam_color_enriched[cam_idx] = (cam_data["cycle"], enriched, time.time())
+
+    def _try_publish_enriched_batch(self):
+        n_cameras = len(RTSP_URLS)
+        now = time.time()
+
+        with self._cam_color_lock:
+            if len(self._cam_color_enriched) < n_cameras:
+                if self._cam_color_enriched:
+                    oldest_ts = min(ts for _, _, ts in self._cam_color_enriched.values())
+                    if now - oldest_ts < 0.5:
+                        return
+                else:
+                    return
+
+            all_entries = []
+            for cam_idx in sorted(self._cam_color_enriched):
+                _, entries, _ = self._cam_color_enriched[cam_idx]
+                all_entries.extend(entries)
+
+            self._cam_color_enriched.clear()
+
+        if all_entries:
+            self._publisher.publish_latest({"data": all_entries})
 
     def get_detections(self):
         with self._det_lock:

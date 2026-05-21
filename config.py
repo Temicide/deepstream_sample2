@@ -57,6 +57,9 @@ TRACKER_DISPLAY_ID = 1
 TRACKER_GPU_ID = 0
 TRACKER_COMPUTE_HW = 0  # 0=default, 1=GPU, 2=VIC on Jetson
 
+# Vehicle color detection: COCO 0-indexed class IDs (car, motorcycle, bus, truck)
+VEHICLE_CLASS_IDS = {2, 3, 5, 7}
+
 # Optional: POST detection JSON to another backend.
 # ถ้าว่างไว้จะยังเปิด /detections ให้ server นี้อ่านได้ตามปกติ
 DETECTION_SERVER_URL = "http://10.0.11.153:8080/api/v1/raw_data/batch"
