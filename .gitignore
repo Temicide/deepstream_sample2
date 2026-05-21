@@ -7,8 +7,5 @@ env/
 .agents/
 skills-lock.json
 
-# Generated DeepStream/TensorRT build outputs
-*.o
-*.so
-*.engine
+
 
