@@ -48,7 +48,8 @@ YOLO_OUTPUT_BLOB_NAMES = "output0"  # optional, ใช้เมื่อ parser/
 
 # Optional: POST detection JSON to another backend.
 # ถ้าว่างไว้จะยังเปิด /detections ให้ server นี้อ่านได้ตามปกติ
-DETECTION_SERVER_URL = ""
+DETECTION_SERVER_URL = "http://10.0.11.153:8080/api/v1/raw_data/batch"
 DETECTION_POST_INTERVAL_SEC = 0.25
 DETECTION_POST_TIMEOUT_SEC = 1.0
 DETECTION_MIN_CONFIDENCE = 0.0
+JETSON_ID = "jetson-nano-01"

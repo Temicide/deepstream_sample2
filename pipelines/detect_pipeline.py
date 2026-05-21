@@ -4,6 +4,7 @@ import json
 import queue
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 import gi
@@ -17,6 +18,7 @@ from config import (
     DETECTION_POST_INTERVAL_SEC,
     DETECTION_POST_TIMEOUT_SEC,
     DETECTION_SERVER_URL,
+    JETSON_ID,
     MAX_RTSP_SOURCES,
     MUX_HEIGHT,
     MUX_WIDTH,
@@ -37,6 +39,7 @@ class DetectionJsonPublisher:
         self._last_post_ts = 0.0
         self._last_error = ""
         self._last_ok_ts = 0.0
+        self._last_item_count = 0
 
     def start(self):
         if not self.url or self._thread:
@@ -68,6 +71,7 @@ class DetectionJsonPublisher:
             "url": self.url,
             "last_ok_ts": self._last_ok_ts,
             "last_error": self._last_error,
+            "last_item_count": self._last_item_count,
         }
 
     def _run(self):
@@ -93,6 +97,7 @@ class DetectionJsonPublisher:
                     response.read()
                 self._last_ok_ts = time.time()
                 self._last_error = ""
+                self._last_item_count = len(payload.get("data", []))
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 self._last_error = repr(exc)
                 print(f"[WARN] Detection JSON POST failed: {self._last_error}")
@@ -224,6 +229,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
             return Gst.PadProbeReturn.OK
 
         now = time.time()
+        raw_data_batch = {"data": []}
         result = {
             "timestamp": now,
             "pipeline": self.mode_name,
@@ -272,22 +278,40 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 except Exception:
                     label = str(obj_meta.class_id)
 
+                bbox = {
+                    "left": float(rect.left),
+                    "top": float(rect.top),
+                    "width": float(rect.width),
+                    "height": float(rect.height),
+                }
+                raw_bbox = self._scale_bbox_to_source_frame(frame_meta, bbox)
+                track_id = self._format_track_id(getattr(obj_meta, "object_id", None))
+
                 cam_result["objects"].append({
                     "class_id": int(obj_meta.class_id),
                     "label": label,
                     "confidence": confidence,
-                    "bbox": {
-                        "left": float(rect.left),
-                        "top": float(rect.top),
-                        "width": float(rect.width),
-                        "height": float(rect.height),
-                    },
+                    "track_id": track_id,
+                    "bbox": bbox,
                     "bbox_norm": {
-                        "left": float(rect.left) / max(1, MUX_WIDTH),
-                        "top": float(rect.top) / max(1, MUX_HEIGHT),
-                        "width": float(rect.width) / max(1, MUX_WIDTH),
-                        "height": float(rect.height) / max(1, MUX_HEIGHT),
+                        "left": bbox["left"] / max(1, MUX_WIDTH),
+                        "top": bbox["top"] / max(1, MUX_HEIGHT),
+                        "width": bbox["width"] / max(1, MUX_WIDTH),
+                        "height": bbox["height"] / max(1, MUX_HEIGHT),
                     },
+                })
+                raw_data_batch["data"].append({
+                    "timestamp": self._format_timestamp(now),
+                    "type": label,
+                    "color": "",
+                    "brand": "",
+                    "x": raw_bbox["left"],
+                    "y": raw_bbox["top"],
+                    "width": raw_bbox["width"],
+                    "height": raw_bbox["height"],
+                    "camera_id": f"cam{camera_id + 1}",
+                    "jetson_id": JETSON_ID,
+                    "track_id": track_id,
                 })
 
                 try:
@@ -305,8 +329,43 @@ class DetectPipeline(BaseDeepStreamPipeline):
         with self._det_lock:
             self._detections = result
 
-        self._publisher.publish_latest(result)
+        if raw_data_batch["data"]:
+            self._publisher.publish_latest(raw_data_batch)
         return Gst.PadProbeReturn.OK
+
+    @staticmethod
+    def _format_timestamp(timestamp_sec: float) -> str:
+        return (
+            datetime.fromtimestamp(timestamp_sec, timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    @staticmethod
+    def _scale_bbox_to_source_frame(frame_meta, bbox: Dict[str, float]) -> Dict[str, float]:
+        source_width = int(getattr(frame_meta, "source_frame_width", 0) or MUX_WIDTH)
+        source_height = int(getattr(frame_meta, "source_frame_height", 0) or MUX_HEIGHT)
+        scale_x = source_width / max(1, MUX_WIDTH)
+        scale_y = source_height / max(1, MUX_HEIGHT)
+        return {
+            "left": bbox["left"] * scale_x,
+            "top": bbox["top"] * scale_y,
+            "width": bbox["width"] * scale_x,
+            "height": bbox["height"] * scale_y,
+        }
+
+    @staticmethod
+    def _format_track_id(object_id) -> str:
+        if object_id is None:
+            return ""
+        try:
+            object_id_int = int(object_id)
+        except (TypeError, ValueError, OverflowError):
+            return ""
+        if object_id_int < 0 or object_id_int >= 0xFFFFFFFFFFFFFFFE:
+            return ""
+        return str(object_id_int)
 
     def get_detections(self):
         with self._det_lock:

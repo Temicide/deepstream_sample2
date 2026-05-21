@@ -154,11 +154,14 @@ http://JETSON_IP:8000/detections/cam/1
 ถ้าต้องการให้ pipeline POST detection JSON ไป backend อื่น ให้แก้ใน `config.py`:
 
 ```python
-DETECTION_SERVER_URL = "http://YOUR_SERVER:9000/detections"
+DETECTION_SERVER_URL = "http://10.0.11.153:8080/api/v1/raw_data/batch"
 DETECTION_POST_INTERVAL_SEC = 0.25
 DETECTION_MIN_CONFIDENCE = 0.25
+JETSON_ID = "jetson-nano-01"
 ```
 
+ระบบจะส่ง `POST` เป็น JSON รูปแบบ `{"data": [...]}` พร้อม header `Content-Type: application/json`.
+ค่า `x`, `y`, `width`, `height` ใน payload ที่ส่งออกจะ scale กลับเป็นขนาดภาพต้นทางของกล้องเมื่อ DeepStream มี metadata นี้
 ถ้า `DETECTION_SERVER_URL` ว่างไว้ ระบบจะไม่ POST ออก แต่ยังดู JSON ได้จาก `/detections`
 
 ## Recommended camera setting for Jetson Nano 4GB
