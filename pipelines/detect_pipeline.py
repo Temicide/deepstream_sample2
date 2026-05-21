@@ -155,6 +155,12 @@ class DetectPipeline(BaseDeepStreamPipeline):
             raise RuntimeError(f"Unable to get {element.get_name()} src pad")
         srcpad.add_probe(Gst.PadProbeType.BUFFER, self._tracked_src_pad_buffer_probe, None)
 
+    def _attach_osd_style_probe(self, element):
+        sinkpad = element.get_static_pad("sink")
+        if not sinkpad:
+            raise RuntimeError(f"Unable to get {element.get_name()} sink pad")
+        sinkpad.add_probe(Gst.PadProbeType.BUFFER, self._osd_sink_pad_buffer_probe, None)
+
     @staticmethod
     def _configure_leaky_queue(element):
         element.set_property("max-size-buffers", 2)
@@ -193,10 +199,11 @@ class DetectPipeline(BaseDeepStreamPipeline):
         )
 
         nvosd = make_element("nvdsosd", "onscreendisplay")
-        try:
-            nvosd.set_property("process-mode", 0)
-        except Exception:
-            pass
+        set_optional_property(nvosd, "process-mode", 0)
+        set_optional_property(nvosd, "display-bbox", True)
+        set_optional_property(nvosd, "display-text", False)
+        set_optional_property(nvosd, "display-mask", False)
+        self._attach_osd_style_probe(nvosd)
 
         mosaic_conv, _, _ = self._make_convert_chain(
             suffix="mosaic", width=width, height=height
@@ -368,9 +375,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 rect = obj_meta.rect_params
                 confidence = float(obj_meta.confidence)
                 tracker_confidence = float(getattr(obj_meta, "tracker_confidence", -1.0))
-                should_skip = self._should_skip_object(confidence)
-                self._style_rect_for_osd(rect, visible=not should_skip)
-                if should_skip:
+                if self._should_skip_object(confidence):
                     try:
                         l_obj = l_obj.next
                     except StopIteration:
@@ -448,6 +453,47 @@ class DetectPipeline(BaseDeepStreamPipeline):
 
         if raw_data_batch["data"]:
             self._publisher.publish_latest(raw_data_batch)
+        return Gst.PadProbeReturn.OK
+
+    def _osd_sink_pad_buffer_probe(self, pad, info, u_data):
+        gst_buffer = info.get_buffer()
+        if not gst_buffer:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
+        l_frame = batch_meta.frame_meta_list
+        while l_frame is not None:
+            try:
+                frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+            except StopIteration:
+                break
+
+            l_obj = frame_meta.obj_meta_list
+            while l_obj is not None:
+                try:
+                    obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+                except StopIteration:
+                    break
+
+                confidence = float(obj_meta.confidence)
+                self._style_rect_for_osd(
+                    obj_meta.rect_params,
+                    visible=not self._should_skip_object(confidence),
+                )
+
+                try:
+                    l_obj = l_obj.next
+                except StopIteration:
+                    break
+
+            try:
+                l_frame = l_frame.next
+            except StopIteration:
+                break
+
         return Gst.PadProbeReturn.OK
 
     @staticmethod
