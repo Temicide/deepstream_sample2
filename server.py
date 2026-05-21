@@ -3,7 +3,7 @@ import time
 
 import uvicorn
 from fastapi import FastAPI, Path
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, RedirectResponse
 
 from config import OUTPUT_FPS, RTSP_URLS
 from pipelines.live_pipeline import LivePipeline
@@ -18,6 +18,11 @@ STATE = {
     "pipeline": None,
     "started_at": time.time(),
 }
+
+
+@app.get("/")
+def index():
+    return RedirectResponse(url="/monitor")
 
 
 def mjpeg_generator(pipeline):
