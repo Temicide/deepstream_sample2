@@ -155,10 +155,112 @@ class DetectPipeline(BaseDeepStreamPipeline):
             raise RuntimeError(f"Unable to get {element.get_name()} src pad")
         srcpad.add_probe(Gst.PadProbeType.BUFFER, self._tracked_src_pad_buffer_probe, None)
 
+    @staticmethod
+    def _configure_leaky_queue(element):
+        element.set_property("max-size-buffers", 2)
+        element.set_property("leaky", 2)
+
+    @staticmethod
+    def _link_tee_to_queue(tee, queue_element, branch_name: str):
+        tee_src = tee.get_request_pad("src_%u")
+        if not tee_src:
+            raise RuntimeError(f"Unable to get tee src pad for {branch_name} branch")
+        queue_sink = queue_element.get_static_pad("sink")
+        if tee_src.link(queue_sink) != Gst.PadLinkReturn.OK:
+            raise RuntimeError(f"Failed to link tee -> {queue_element.get_name()}")
+
+    def _build_mosaic_osd_branch(
+        self,
+        tee,
+        rows: int,
+        columns: int,
+        width: int,
+        height: int,
+    ):
+        q_mosaic = make_element("queue", "q-mosaic-osd")
+        self._configure_leaky_queue(q_mosaic)
+
+        tiler = make_element("nvmultistreamtiler", "nvtiler")
+        tiler.set_property("rows", rows)
+        tiler.set_property("columns", columns)
+        tiler.set_property("width", width)
+        tiler.set_property("height", height)
+
+        nvvidconv_preosd = make_element("nvvideoconvert", "pre-osd-converter")
+        caps_rgba_preosd = make_element("capsfilter", "caps-rgba-preosd")
+        caps_rgba_preosd.set_property(
+            "caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA"),
+        )
+
+        nvosd = make_element("nvdsosd", "onscreendisplay")
+        try:
+            nvosd.set_property("process-mode", 0)
+        except Exception:
+            pass
+
+        mosaic_conv, _, _ = self._make_convert_chain(
+            suffix="mosaic", width=width, height=height
+        )
+        mosaic_sink = self._make_appsink("appsink-mosaic", self._on_new_sample)
+
+        for el in [q_mosaic, tiler, nvvidconv_preosd, caps_rgba_preosd, nvosd] + mosaic_conv + [mosaic_sink]:
+            self.pipeline.add(el)
+
+        self._link_tee_to_queue(tee, q_mosaic, "mosaic")
+
+        mosaic_chain = [q_mosaic, tiler, nvvidconv_preosd, caps_rgba_preosd, nvosd] + mosaic_conv + [mosaic_sink]
+        for a, b in zip(mosaic_chain[:-1], mosaic_chain[1:]):
+            if not a.link(b):
+                raise RuntimeError(f"Failed to link {a.get_name()} -> {b.get_name()}")
+
+        print("[INFO] Built mosaic branch (tracker -> OSD, no remux)")
+
+    def _build_per_camera_branch(self, tee):
+        q_demux = make_element("queue", "q-per-camera-demux")
+        self._configure_leaky_queue(q_demux)
+        demux = make_element("nvstreamdemux", "nvstream-demux")
+
+        self.pipeline.add(q_demux)
+        self.pipeline.add(demux)
+
+        self._link_tee_to_queue(tee, q_demux, "per-camera")
+        if not q_demux.link(demux):
+            raise RuntimeError("Failed to link q-per-camera-demux -> nvstreamdemux")
+
+        for i in range(len(RTSP_URLS)):
+            demux_src = demux.get_request_pad(f"src_{i}")
+            if not demux_src:
+                raise RuntimeError(f"nvstreamdemux: cannot get src_{i}")
+
+            q_cam = make_element("queue", f"q-cam{i}")
+            self._configure_leaky_queue(q_cam)
+
+            conv_els, _, _ = self._make_convert_chain(
+                suffix=f"cam{i}", width=MUX_WIDTH, height=MUX_HEIGHT
+            )
+
+            def _cam_cb(sink, idx=i):
+                return self._on_camera_sample(sink, idx)
+
+            cam_sink = self._make_appsink(f"appsink-cam{i}", _cam_cb)
+
+            for el in [q_cam] + conv_els + [cam_sink]:
+                self.pipeline.add(el)
+
+            if demux_src.link(q_cam.get_static_pad("sink")) != Gst.PadLinkReturn.OK:
+                raise RuntimeError(f"Failed to link demux src_{i} -> q-cam{i}")
+
+            cam_chain = [q_cam] + conv_els + [cam_sink]
+            for a, b in zip(cam_chain[:-1], cam_chain[1:]):
+                if not a.link(b):
+                    raise RuntimeError(f"Failed to link {a.get_name()} -> {b.get_name()}")
+
+            print(f"[INFO] Built per-camera branch for cam {i}")
+
     def build(self):
         """
         Override build เพื่อแทรก nvinfer ก่อน nvstreamdemux
-        และ nvdsosd เฉพาะใน mosaic path หลัง remux
+        และให้ mosaic OSD รับ metadata ตรงจาก tracker ก่อนแยกเป็น per-camera
         """
         self.pipeline = Gst.Pipeline.new(f"deepstream-{self.mode_name}-pipeline")
         if not self.pipeline:
@@ -200,42 +302,22 @@ class DetectPipeline(BaseDeepStreamPipeline):
             print("[INFO] nvtracker disabled")
         self._attach_detection_probe(pre_demux)
 
-        # ── nvstreamdemux -> per-camera branches + remux ─────────────
-        _, remux = self._build_demux_branches(pre_demux)
+        # ── split tracked metadata: mosaic OSD keeps original batch metadata
+        #    while per-camera appsinks still receive individual decoded streams.
+        tee = make_element("tee", "tracked-output-tee")
+        self.pipeline.add(tee)
+        if not pre_demux.link(tee):
+            raise RuntimeError(f"Failed to link {pre_demux.get_name()} -> tracked-output-tee")
 
-        # ── mosaic path: remux -> tiler -> osd -> convert -> appsink ──
-        tiler = make_element("nvmultistreamtiler", "nvtiler")
-        tiler.set_property("rows", TILER_ROWS)
-        tiler.set_property("columns", TILER_COLUMNS)
-        tiler.set_property("width", TILER_WIDTH)
-        tiler.set_property("height", TILER_HEIGHT)
-
-        nvvidconv_preosd = make_element("nvvideoconvert", "pre-osd-converter")
-        caps_rgba_preosd = make_element("capsfilter", "caps-rgba-preosd")
-        caps_rgba_preosd.set_property(
-            "caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA"),
+        self._build_mosaic_osd_branch(
+            tee,
+            rows=TILER_ROWS,
+            columns=TILER_COLUMNS,
+            width=TILER_WIDTH,
+            height=TILER_HEIGHT,
         )
+        self._build_per_camera_branch(tee)
 
-        nvosd = make_element("nvdsosd", "onscreendisplay")
-        try:
-            nvosd.set_property("process-mode", 0)
-        except Exception:
-            pass
-
-        mosaic_conv, _, _ = self._make_convert_chain(
-            suffix="mosaic", width=TILER_WIDTH, height=TILER_HEIGHT
-        )
-        mosaic_sink = self._make_appsink("appsink-mosaic", self._on_new_sample)
-
-        for el in [tiler, nvvidconv_preosd, caps_rgba_preosd, nvosd] + mosaic_conv + [mosaic_sink]:
-            self.pipeline.add(el)
-
-        mosaic_chain = [remux, tiler, nvvidconv_preosd, caps_rgba_preosd, nvosd] + mosaic_conv + [mosaic_sink]
-        for a, b in zip(mosaic_chain[:-1], mosaic_chain[1:]):
-            if not a.link(b):
-                raise RuntimeError(f"Failed to link {a.get_name()} -> {b.get_name()}")
-
-        print("[INFO] Built mosaic branch (detect mode with OSD)")
         print(f"[INFO] nvinfer config: {infer_config_path}")
         return self.pipeline
 
@@ -286,7 +368,9 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 rect = obj_meta.rect_params
                 confidence = float(obj_meta.confidence)
                 tracker_confidence = float(getattr(obj_meta, "tracker_confidence", -1.0))
-                if self._should_skip_object(confidence):
+                should_skip = self._should_skip_object(confidence)
+                self._style_rect_for_osd(rect, visible=not should_skip)
+                if should_skip:
                     try:
                         l_obj = l_obj.next
                     except StopIteration:
@@ -410,6 +494,15 @@ class DetectPipeline(BaseDeepStreamPipeline):
         if detector_confidence < 0 and self._tracker_enabled:
             return False
         return detector_confidence < DETECTION_MIN_CONFIDENCE
+
+    @staticmethod
+    def _style_rect_for_osd(rect, visible: bool):
+        try:
+            rect.border_width = 2 if visible else 0
+            if visible:
+                rect.border_color.set(0.0, 1.0, 0.0, 1.0)
+        except Exception:
+            pass
 
     @staticmethod
     def _output_confidence(detector_confidence: float, tracker_confidence: float) -> float:

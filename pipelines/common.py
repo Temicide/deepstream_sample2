@@ -201,6 +201,7 @@ class BaseDeepStreamPipeline:
         sink = make_element("appsink", name)
         sink.set_property("emit-signals", True)
         sink.set_property("sync", False)
+        set_optional_property(sink, "async", False)
         sink.set_property("max-buffers", 1)
         sink.set_property("drop", True)
         sink.connect("new-sample", callback)

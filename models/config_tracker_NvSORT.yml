@@ -9,9 +9,9 @@ TargetManagement:
   maxTargetsPerStream: 300
   minIouDiff4NewTarget: 0.55
   minTrackerConfidence: 0.75
-  probationAge: 4
+  probationAge: 1
   maxShadowTrackingAge: 30
-  earlyTerminationAge: 1
+  earlyTerminationAge: 3
 
 TrajectoryManagement:
   useUniqueID: 1
@@ -26,7 +26,7 @@ DataAssociator:
   matchingScoreWeight4SizeSimilarity: 0.15
   matchingScoreWeight4Iou: 0.40
   tentativeDetectorConfidence: 0.20
-  minMatchingScore4TentativeIou: 0.25
+  minMatchingScore4TentativeIou: 0.10
   usePrediction4Assoc: 1
 
 StateEstimator:
