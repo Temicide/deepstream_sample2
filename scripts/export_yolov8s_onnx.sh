@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODEL_PT="${1:-models/yolov8s.pt}"
 MODEL_ONNX="${2:-models/yolov8s.onnx}"
-IMG_SIZE="${IMG_SIZE:-224}"
+IMG_SIZE="${IMG_SIZE:-640}"
 OPSET="${OPSET:-12}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 

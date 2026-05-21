@@ -25,7 +25,7 @@ from config import (
     MUX_WIDTH,
     RTSP_URLS,
 )
-from pipelines.common import BaseDeepStreamPipeline, make_element
+from pipelines.common import BaseDeepStreamPipeline, make_element, set_optional_property
 from pipelines.model_config import ensure_primary_infer_config
 
 
@@ -166,6 +166,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
         streammux.set_property("batch-size", MUX_BATCH_SIZE)
         streammux.set_property("batched-push-timeout", MUX_TIMEOUT_USEC)
         streammux.set_property("live-source", 1)
+        set_optional_property(streammux, "enable-padding", True)
         self.pipeline.add(streammux)
         self._build_sources(streammux)
 
@@ -353,13 +354,31 @@ class DetectPipeline(BaseDeepStreamPipeline):
     def _scale_bbox_to_source_frame(frame_meta, bbox: Dict[str, float]) -> Dict[str, float]:
         source_width = int(getattr(frame_meta, "source_frame_width", 0) or MUX_WIDTH)
         source_height = int(getattr(frame_meta, "source_frame_height", 0) or MUX_HEIGHT)
-        scale_x = source_width / max(1, MUX_WIDTH)
-        scale_y = source_height / max(1, MUX_HEIGHT)
+
+        scale = min(MUX_WIDTH / max(1, source_width), MUX_HEIGHT / max(1, source_height))
+        if scale <= 0:
+            scale = 1.0
+
+        scaled_width = source_width * scale
+        scaled_height = source_height * scale
+        pad_x = max(0.0, (MUX_WIDTH - scaled_width) * 0.5)
+        pad_y = max(0.0, (MUX_HEIGHT - scaled_height) * 0.5)
+
+        left = (bbox["left"] - pad_x) / scale
+        top = (bbox["top"] - pad_y) / scale
+        right = (bbox["left"] + bbox["width"] - pad_x) / scale
+        bottom = (bbox["top"] + bbox["height"] - pad_y) / scale
+
+        left = min(max(left, 0.0), float(source_width))
+        top = min(max(top, 0.0), float(source_height))
+        right = min(max(right, 0.0), float(source_width))
+        bottom = min(max(bottom, 0.0), float(source_height))
+
         return {
-            "left": bbox["left"] * scale_x,
-            "top": bbox["top"] * scale_y,
-            "width": bbox["width"] * scale_x,
-            "height": bbox["height"] * scale_y,
+            "left": left,
+            "top": top,
+            "width": max(0.0, right - left),
+            "height": max(0.0, bottom - top),
         }
 
     @staticmethod

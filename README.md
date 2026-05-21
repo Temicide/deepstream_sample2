@@ -99,7 +99,7 @@ http://JETSON_IP:8000/video/gray
 
 ```python
 YOLO_ONNX_PATH = "models/yolov8s.onnx"
-YOLO_INPUT_DIMS = "3;224;224"
+YOLO_INPUT_DIMS = "3;640;640"
 YOLO_NUM_CLASSES = 80
 YOLO_CLUSTER_MODE = 2
 ```
@@ -107,7 +107,7 @@ YOLO_CLUSTER_MODE = 2
 เมื่อเริ่ม server ระบบจะ generate `models/config_infer_primary.txt` ให้อัตโนมัติ และตั้ง `model-engine-file` ตามชื่อ ONNX + batch 5 + precision เช่น:
 
 ```text
-models/yolov8s.onnx_b5_gpu0_fp16.engine
+models/yolov8s.onnx_3x640x640_b5_gpu0_fp16.engine
 ```
 
 ถ้าเปลี่ยนเป็น model ใหม่ ให้แก้ `YOLO_ONNX_PATH`, `YOLO_INPUT_DIMS`, `YOLO_NUM_CLASSES`, parser settings ถ้าจำเป็น แล้ว restart server. DeepStream/TensorRT จะ build engine ใหม่ในครั้งแรกที่รันกับ model นั้น
@@ -119,19 +119,27 @@ python3 -m pip install ultralytics
 bash scripts/export_yolov8s_onnx.sh models/yolov8s.pt models/yolov8s.onnx
 ```
 
-สคริปต์นี้จะ export ด้วย `imgsz=224` และบันทึกผลไว้ที่ `models/yolov8s.onnx`
+สคริปต์นี้จะ export ด้วย `imgsz=640` และบันทึกผลไว้ที่ `models/yolov8s.onnx`
 
 สำหรับ Ultralytics YOLO:
 
 - YOLOv8/v11 raw output มักใช้ `YOLO_CLUSTER_MODE = 2` และต้องมี custom bbox parser
-- YOLOv10/v26 post-NMS output มักใช้ `YOLO_CLUSTER_MODE = 4`
+- YOLOv10/v26 post-NMS output ต้องใช้ parser ที่รองรับ post-NMS และมักใช้ `YOLO_CLUSTER_MODE = 4`
 - ถ้า ONNX เป็น dynamic shape ต้องมี `YOLO_INPUT_DIMS` เช่น `3;640;640`
+- custom parser ในโปรเจกต์นี้ decode raw YOLOv8 `output0` และปล่อยเฉพาะ vehicle classes: bicycle, car, motorcycle, bus, truck
 
 ถ้า model ต้องใช้ custom parser:
 
 ```python
 YOLO_CUSTOM_LIB_PATH = "./libnvdsinfer_custom_impl_Yolo.so"
 YOLO_PARSE_BBOX_FUNC = "NvDsInferParseYolo"
+```
+
+หลังแก้ parser ให้ rebuild library บนเครื่อง Jetson/DeepStream:
+
+```bash
+cd nvdsinfer_custom_impl_Yolo
+make clean && CUDA_VER=10.2 make
 ```
 
 ```bash

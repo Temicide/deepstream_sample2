@@ -39,7 +39,8 @@ def _precision_name(network_mode: int) -> str:
 def _default_engine_path() -> str:
     onnx_path = Path(YOLO_ONNX_PATH)
     precision = _precision_name(YOLO_NETWORK_MODE)
-    return str(onnx_path.with_name(f"{onnx_path.name}_b{MUX_BATCH_SIZE}_gpu0_{precision}.engine"))
+    dims = YOLO_INPUT_DIMS.replace(";", "x")
+    return str(onnx_path.with_name(f"{onnx_path.name}_{dims}_b{MUX_BATCH_SIZE}_gpu0_{precision}.engine"))
 
 
 def ensure_primary_infer_config() -> str:
@@ -65,6 +66,8 @@ def ensure_primary_infer_config() -> str:
         "net-scale-factor=0.00392156862745098",
         "model-color-format=0",
         f"infer-dims={YOLO_INPUT_DIMS}",
+        "maintain-aspect-ratio=1",
+        "symmetric-padding=1",
         f"network-mode={YOLO_NETWORK_MODE}",
         f"batch-size={MUX_BATCH_SIZE}",
         f"interval={YOLO_INTERVAL}",

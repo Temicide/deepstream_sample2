@@ -76,6 +76,12 @@ def make_element(factory_name: str, name: str):
         raise RuntimeError(f"Could not create GStreamer element: {factory_name} name={name}")
     return element
 
+def set_optional_property(element, property_name: str, value) -> bool:
+    if not element.find_property(property_name):
+        return False
+    element.set_property(property_name, value)
+    return True
+
 def request_mux_sink_pad(mux, index: int):
     sinkpad = mux.get_request_pad(f"sink_{index}")
     if sinkpad:
@@ -262,6 +268,7 @@ class BaseDeepStreamPipeline:
         remux.set_property("batch-size", n)
         remux.set_property("batched-push-timeout", MUX_TIMEOUT_USEC)
         remux.set_property("live-source", 1)
+        set_optional_property(remux, "enable-padding", True)
         self.pipeline.add(remux)
 
         for i in range(n):
@@ -365,6 +372,7 @@ class BaseDeepStreamPipeline:
         streammux.set_property("batch-size", MUX_BATCH_SIZE)
         streammux.set_property("batched-push-timeout", MUX_TIMEOUT_USEC)
         streammux.set_property("live-source", 1)
+        set_optional_property(streammux, "enable-padding", True)
         self.pipeline.add(streammux)
         self._build_sources(streammux)
 
