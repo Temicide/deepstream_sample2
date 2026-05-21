@@ -1,0 +1,36 @@
+%YAML:1.0
+
+BaseConfig:
+  minDetectorConfidence: 0.15
+
+TargetManagement:
+  enableBboxUnClipping: 0
+  preserveStreamUpdateOrder: 0
+  maxTargetsPerStream: 300
+  minIouDiff4NewTarget: 0.55
+  minTrackerConfidence: 0.75
+  probationAge: 4
+  maxShadowTrackingAge: 30
+  earlyTerminationAge: 1
+
+TrajectoryManagement:
+  useUniqueID: 1
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  checkClassMatch: 1
+  minMatchingScore4Overall: 0.25
+  minMatchingScore4SizeSimilarity: 0.35
+  minMatchingScore4Iou: 0.20
+  matchingScoreWeight4SizeSimilarity: 0.15
+  matchingScoreWeight4Iou: 0.40
+  tentativeDetectorConfidence: 0.20
+  minMatchingScore4TentativeIou: 0.25
+  usePrediction4Assoc: 1
+
+StateEstimator:
+  stateEstimatorType: 2
+  noiseWeightVar4Loc: 0.03
+  noiseWeightVar4Vel: 0.002
+  useAspectRatio: 1

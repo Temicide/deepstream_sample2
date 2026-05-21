@@ -24,9 +24,17 @@ from config import (
     MUX_HEIGHT,
     MUX_WIDTH,
     RTSP_URLS,
+    TRACKER_COMPUTE_HW,
+    TRACKER_CONFIG_PATH,
+    TRACKER_DISPLAY_ID,
+    TRACKER_ENABLE,
+    TRACKER_GPU_ID,
+    TRACKER_HEIGHT,
+    TRACKER_LIB_FILE,
+    TRACKER_WIDTH,
 )
 from pipelines.common import BaseDeepStreamPipeline, make_element, set_optional_property
-from pipelines.model_config import ensure_primary_infer_config
+from pipelines.model_config import abs_project_path, ensure_primary_infer_config
 
 
 class DetectionJsonPublisher:
@@ -109,9 +117,9 @@ class DetectionJsonPublisher:
 class DetectPipeline(BaseDeepStreamPipeline):
     """
     Phase 3:
-    RTSP x5 -> decode -> nvstreammux -> nvinfer -> tiler -> nvdsosd -> appsink -> FastAPI MJPEG
+    RTSP x5 -> decode -> nvstreammux -> nvinfer -> optional nvtracker -> tiler -> nvdsosd -> appsink
 
-    เพิ่ม /detections โดยอ่าน metadata จาก nvinfer ผ่าน pad probe
+    เพิ่ม /detections โดยอ่าน metadata หลัง tracker เพื่อให้ track_id ต่อเนื่องเมื่อเปิด tracker
     """
 
     def __init__(self):
@@ -128,22 +136,24 @@ class DetectPipeline(BaseDeepStreamPipeline):
             DETECTION_POST_TIMEOUT_SEC,
             DETECTION_POST_INTERVAL_SEC,
         )
+        self._tracker_enabled = TRACKER_ENABLE
 
-    def create_custom_elements(self):
-        pgie = make_element("nvinfer", "primary-inference")
-        pgie.set_property("config-file-path", ensure_primary_infer_config())
+    def _create_tracker(self):
+        tracker = make_element("nvtracker", "object-tracker")
+        tracker.set_property("ll-lib-file", TRACKER_LIB_FILE)
+        tracker.set_property("ll-config-file", abs_project_path(TRACKER_CONFIG_PATH))
+        tracker.set_property("tracker-width", TRACKER_WIDTH)
+        tracker.set_property("tracker-height", TRACKER_HEIGHT)
+        tracker.set_property("display-tracking-id", TRACKER_DISPLAY_ID)
+        tracker.set_property("gpu-id", TRACKER_GPU_ID)
+        set_optional_property(tracker, "compute-hw", TRACKER_COMPUTE_HW)
+        return tracker
 
-        # วาง probe ที่ src pad ของ pgie เพื่ออ่าน metadata ก่อนเข้า tiler/osd
-        srcpad = pgie.get_static_pad("src")
+    def _attach_detection_probe(self, element):
+        srcpad = element.get_static_pad("src")
         if not srcpad:
-            raise RuntimeError("Unable to get pgie src pad")
-        srcpad.add_probe(Gst.PadProbeType.BUFFER, self._pgie_src_pad_buffer_probe, None)
-
-        # nvdsosd ต้องอยู่หลัง tiler ใน common chain ไม่ได้แทรกเอง
-        # ดังนั้นเราจะ return pgie ก่อน แล้ว override build chain ด้วยการเพิ่ม osd หลัง tiler ไม่ได้ใน base เดิม
-        # วิธีง่ายสุด: ใช้ pgie เป็น custom element และเพิ่ม osd โดย override create_post_tiler_elements
-        self._needs_osd = True
-        return [pgie]
+            raise RuntimeError(f"Unable to get {element.get_name()} src pad")
+        srcpad.add_probe(Gst.PadProbeType.BUFFER, self._tracked_src_pad_buffer_probe, None)
 
     def build(self):
         """
@@ -174,16 +184,24 @@ class DetectPipeline(BaseDeepStreamPipeline):
         infer_config_path = ensure_primary_infer_config()
         pgie = make_element("nvinfer", "primary-inference")
         pgie.set_property("config-file-path", infer_config_path)
-        srcpad = pgie.get_static_pad("src")
-        if not srcpad:
-            raise RuntimeError("Unable to get pgie src pad")
-        srcpad.add_probe(Gst.PadProbeType.BUFFER, self._pgie_src_pad_buffer_probe, None)
         self.pipeline.add(pgie)
         if not streammux.link(pgie):
             raise RuntimeError("Failed to link streammux -> pgie")
 
+        pre_demux = pgie
+        if TRACKER_ENABLE:
+            tracker = self._create_tracker()
+            self.pipeline.add(tracker)
+            if not pgie.link(tracker):
+                raise RuntimeError("Failed to link pgie -> tracker")
+            pre_demux = tracker
+            print(f"[INFO] nvtracker enabled: {TRACKER_CONFIG_PATH}")
+        else:
+            print("[INFO] nvtracker disabled")
+        self._attach_detection_probe(pre_demux)
+
         # ── nvstreamdemux -> per-camera branches + remux ─────────────
-        _, remux = self._build_demux_branches(pgie)
+        _, remux = self._build_demux_branches(pre_demux)
 
         # ── mosaic path: remux -> tiler -> osd -> convert -> appsink ──
         tiler = make_element("nvmultistreamtiler", "nvtiler")
@@ -221,7 +239,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
         print(f"[INFO] nvinfer config: {infer_config_path}")
         return self.pipeline
 
-    def _pgie_src_pad_buffer_probe(self, pad, info, u_data):
+    def _tracked_src_pad_buffer_probe(self, pad, info, u_data):
         gst_buffer = info.get_buffer()
         if not gst_buffer:
             return Gst.PadProbeReturn.OK
@@ -267,12 +285,14 @@ class DetectPipeline(BaseDeepStreamPipeline):
 
                 rect = obj_meta.rect_params
                 confidence = float(obj_meta.confidence)
-                if confidence < DETECTION_MIN_CONFIDENCE:
+                tracker_confidence = float(getattr(obj_meta, "tracker_confidence", -1.0))
+                if self._should_skip_object(confidence):
                     try:
                         l_obj = l_obj.next
                     except StopIteration:
                         break
                     continue
+                output_confidence = self._output_confidence(confidence, tracker_confidence)
 
                 label = ""
                 try:
@@ -289,14 +309,19 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 raw_bbox = self._scale_bbox_to_source_frame(frame_meta, bbox)
                 detection_uuid = str(uuid.uuid4())
                 track_id = (
-                    self._format_track_id(getattr(obj_meta, "object_id", None))
+                    self._format_track_id(
+                        getattr(obj_meta, "object_id", None),
+                        allow_zero=self._tracker_enabled,
+                    )
                     or detection_uuid
                 )
 
                 cam_result["objects"].append({
                     "class_id": int(obj_meta.class_id),
                     "label": label,
-                    "confidence": confidence,
+                    "confidence": output_confidence,
+                    "detector_confidence": confidence,
+                    "tracker_confidence": tracker_confidence,
                     "uuid": detection_uuid,
                     "track_id": track_id,
                     "bbox": bbox,
@@ -381,15 +406,30 @@ class DetectPipeline(BaseDeepStreamPipeline):
             "height": max(0.0, bottom - top),
         }
 
+    def _should_skip_object(self, detector_confidence: float) -> bool:
+        if detector_confidence < 0 and self._tracker_enabled:
+            return False
+        return detector_confidence < DETECTION_MIN_CONFIDENCE
+
     @staticmethod
-    def _format_track_id(object_id) -> str:
+    def _output_confidence(detector_confidence: float, tracker_confidence: float) -> float:
+        if detector_confidence >= 0:
+            return detector_confidence
+        if tracker_confidence >= 0:
+            return tracker_confidence
+        return 0.0
+
+    @staticmethod
+    def _format_track_id(object_id, allow_zero: bool = False) -> str:
         if object_id is None:
             return ""
         try:
             object_id_int = int(object_id)
         except (TypeError, ValueError, OverflowError):
             return ""
-        if object_id_int <= 0 or object_id_int >= 0xFFFFFFFFFFFFFFFE:
+        if object_id_int < 0 or object_id_int >= 0xFFFFFFFFFFFFFFFE:
+            return ""
+        if object_id_int == 0 and not allow_zero:
             return ""
         return str(object_id_int)
 

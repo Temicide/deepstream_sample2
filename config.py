@@ -46,6 +46,17 @@ YOLO_CUSTOM_LIB_PATH = "nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo
 YOLO_PARSE_BBOX_FUNC = "NvDsInferParseYolo"  # เช่น NvDsInferParseYolo
 YOLO_OUTPUT_BLOB_NAMES = "output0"  # optional, ใช้เมื่อ parser/model ต้องระบุ output layer
 
+# Tracker settings
+# เปิด nvtracker เพื่อให้ bbox และ track_id ต่อเนื่องข้าม frame โดยยังคุม latency/FPS
+TRACKER_ENABLE = True
+TRACKER_LIB_FILE = "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so"
+TRACKER_CONFIG_PATH = "models/config_tracker_NvSORT.yml"
+TRACKER_WIDTH = 640
+TRACKER_HEIGHT = 384
+TRACKER_DISPLAY_ID = 1
+TRACKER_GPU_ID = 0
+TRACKER_COMPUTE_HW = 0  # 0=default, 1=GPU, 2=VIC on Jetson
+
 # Optional: POST detection JSON to another backend.
 # ถ้าว่างไว้จะยังเปิด /detections ให้ server นี้อ่านได้ตามปกติ
 DETECTION_SERVER_URL = "http://10.0.11.153:8080/api/v1/raw_data/batch"

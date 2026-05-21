@@ -170,8 +170,26 @@ JETSON_ID = "jetson-nano-01"
 
 ระบบจะส่ง `POST` เป็น JSON รูปแบบ `{"data": [...]}` พร้อม header `Content-Type: application/json`.
 ค่า `x`, `y`, `width`, `height` ใน payload ที่ส่งออกจะ scale กลับเป็นขนาดภาพต้นทางของกล้องเมื่อ DeepStream มี metadata นี้
-แต่ละ detection จะมี `uuid` ที่ generate ใหม่ และ `track_id` จะใช้ DeepStream object ID เฉพาะเมื่อมีค่าจริง; ถ้าไม่มี tracker หรือได้ค่า `0` ระบบจะใช้ `uuid` แทน
+แต่ละ detection จะมี `uuid` ที่ generate ใหม่ และ `track_id` จะใช้ DeepStream object ID เฉพาะเมื่อมีค่าจริง; ถ้าไม่มี tracker หรือได้ค่า object ID ที่ไม่ถูกต้อง ระบบจะใช้ `uuid` แทน
 ถ้า `DETECTION_SERVER_URL` ว่างไว้ ระบบจะไม่ POST ออก แต่ยังดู JSON ได้จาก `/detections`
+
+## Tracking / smoother boxes
+
+branch นี้เปิด `nvtracker` หลัง `nvinfer` เพื่อให้ bbox และ `track_id` อยู่กับรถคันเดิมต่อเนื่องข้าม frame:
+
+```python
+TRACKER_ENABLE = True
+TRACKER_CONFIG_PATH = "models/config_tracker_NvSORT.yml"
+```
+
+ค่าเริ่มต้นใช้ NvSORT เพราะเบากว่า DeepSORT/ReID และเหมาะกับการรักษา FPS บน Jetson Nano ที่รัน 5 กล้องพร้อมกัน ถ้ายังมี box หลุดตอนรถบังกันหรือรถหน้าตาคล้ายกันมาก ให้ค่อยทดลอง NvDCF หรือ NvDeepSORT ต่อ แต่จะกิน compute เพิ่มขึ้น
+
+ถ้า tracker เปิดแล้วเจอ error ว่าโหลด low-level library ไม่ได้ ให้ติดตั้ง dependency ของ tracker:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libmosquitto1
+```
 
 ## Recommended camera setting for Jetson Nano 4GB
 
