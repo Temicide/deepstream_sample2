@@ -4,6 +4,7 @@ import json
 import queue
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -285,12 +286,17 @@ class DetectPipeline(BaseDeepStreamPipeline):
                     "height": float(rect.height),
                 }
                 raw_bbox = self._scale_bbox_to_source_frame(frame_meta, bbox)
-                track_id = self._format_track_id(getattr(obj_meta, "object_id", None))
+                detection_uuid = str(uuid.uuid4())
+                track_id = (
+                    self._format_track_id(getattr(obj_meta, "object_id", None))
+                    or detection_uuid
+                )
 
                 cam_result["objects"].append({
                     "class_id": int(obj_meta.class_id),
                     "label": label,
                     "confidence": confidence,
+                    "uuid": detection_uuid,
                     "track_id": track_id,
                     "bbox": bbox,
                     "bbox_norm": {
@@ -301,6 +307,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
                     },
                 })
                 raw_data_batch["data"].append({
+                    "uuid": detection_uuid,
                     "timestamp": self._format_timestamp(now),
                     "type": label,
                     "color": "",
@@ -363,7 +370,7 @@ class DetectPipeline(BaseDeepStreamPipeline):
             object_id_int = int(object_id)
         except (TypeError, ValueError, OverflowError):
             return ""
-        if object_id_int < 0 or object_id_int >= 0xFFFFFFFFFFFFFFFE:
+        if object_id_int <= 0 or object_id_int >= 0xFFFFFFFFFFFFFFFE:
             return ""
         return str(object_id_int)
 

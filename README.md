@@ -162,6 +162,7 @@ JETSON_ID = "jetson-nano-01"
 
 ระบบจะส่ง `POST` เป็น JSON รูปแบบ `{"data": [...]}` พร้อม header `Content-Type: application/json`.
 ค่า `x`, `y`, `width`, `height` ใน payload ที่ส่งออกจะ scale กลับเป็นขนาดภาพต้นทางของกล้องเมื่อ DeepStream มี metadata นี้
+แต่ละ detection จะมี `uuid` ที่ generate ใหม่ และ `track_id` จะใช้ DeepStream object ID เฉพาะเมื่อมีค่าจริง; ถ้าไม่มี tracker หรือได้ค่า `0` ระบบจะใช้ `uuid` แทน
 ถ้า `DETECTION_SERVER_URL` ว่างไว้ ระบบจะไม่ POST ออก แต่ยังดู JSON ได้จาก `/detections`
 
 ## Recommended camera setting for Jetson Nano 4GB
