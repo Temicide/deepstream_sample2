@@ -1,3 +1,8 @@
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
 # แก้ RTSP URL ให้ตรงกับกล้องของคุณ
 RTSP_URLS = [
     "rtsp://10.0.11.153:8554/cctv01",
@@ -59,6 +64,19 @@ TRACKER_COMPUTE_HW = 0  # 0=default, 1=GPU, 2=VIC on Jetson
 
 # Vehicle color detection: COCO 0-indexed class IDs (car, motorcycle, bus, truck)
 VEHICLE_CLASS_IDS = {2, 3, 5, 7}
+
+# Vehicle brand classifier.
+# Uses the semifinal classifier artifacts, but runs inside the root detect pipeline.
+CLASSIFIER_MODEL_PATH = str(PROJECT_ROOT / "deepstream_semifinal" / "models" / "cls.onnx")
+CLASSIFIER_ENGINE_PATH = ""
+CLASSIFIER_LABELS_PATH = str(PROJECT_ROOT / "deepstream_semifinal" / "models" / "labels.json")
+CLASSIFIER_INPUT_SIZE = 224
+CLASSIFIER_BACKEND = "auto"  # auto, ort, opencv, or trt for .engine files
+CLASSIFIER_MIN_CONFIDENCE = 0.0
+CLASSIFIER_OPERATE_ON_CLASS_IDS = VEHICLE_CLASS_IDS
+CLASSIFIER_CACHE_TTL_SEC = 30.0
+CLASSIFIER_CACHE_MAX_SIZE = 512
+CLASSIFIER_MAX_PER_CAMERA_FRAME = 1
 
 # Optional: POST detection JSON to another backend.
 # ถ้าว่างไว้จะยังเปิด /detections ให้ server นี้อ่านได้ตามปกติ

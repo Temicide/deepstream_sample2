@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -20,6 +20,16 @@ import pyds
 import vehicle_color_rule
 
 from config import (
+    CLASSIFIER_BACKEND,
+    CLASSIFIER_CACHE_MAX_SIZE,
+    CLASSIFIER_CACHE_TTL_SEC,
+    CLASSIFIER_ENGINE_PATH,
+    CLASSIFIER_INPUT_SIZE,
+    CLASSIFIER_LABELS_PATH,
+    CLASSIFIER_MAX_PER_CAMERA_FRAME,
+    CLASSIFIER_MIN_CONFIDENCE,
+    CLASSIFIER_MODEL_PATH,
+    CLASSIFIER_OPERATE_ON_CLASS_IDS,
     DETECTION_MIN_CONFIDENCE,
     DETECTION_POST_INTERVAL_SEC,
     DETECTION_POST_TIMEOUT_SEC,
@@ -40,7 +50,23 @@ from config import (
     VEHICLE_CLASS_IDS,
 )
 from pipelines.common import BaseDeepStreamPipeline, encode_jpeg, make_element, set_optional_property
+from pipelines.classifier_runtime import RuntimeModel, classify_crop, load_classifier_labels
 from pipelines.model_config import abs_project_path, ensure_primary_infer_config
+
+
+def _parse_class_ids(value) -> set:
+    if isinstance(value, str):
+        raw_items = value.replace(",", ";").split(";")
+    else:
+        raw_items = list(value or [])
+
+    class_ids = set()
+    for item in raw_items:
+        try:
+            class_ids.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return class_ids
 
 
 class DetectionJsonPublisher:
@@ -147,6 +173,27 @@ class DetectPipeline(BaseDeepStreamPipeline):
         self._cam_color_queue: Dict[int, Dict] = {}
         self._cam_color_enriched: Dict[int, tuple] = {}
         self._color_cycle = 0
+        self._classify_class_ids = _parse_class_ids(CLASSIFIER_OPERATE_ON_CLASS_IDS) or set(VEHICLE_CLASS_IDS)
+        self._classifier_labels = load_classifier_labels(abs_project_path(CLASSIFIER_LABELS_PATH))
+        classifier_model_path = CLASSIFIER_ENGINE_PATH.strip() or CLASSIFIER_MODEL_PATH
+        self._classifier = RuntimeModel(
+            abs_project_path(classifier_model_path),
+            backend=CLASSIFIER_BACKEND,
+            input_size=CLASSIFIER_INPUT_SIZE,
+            role="classifier",
+        )
+        self._brand_cache_lock = threading.Lock()
+        self._brand_cache: Dict[Tuple[int, int, str], Dict[str, Any]] = {}
+        self._classifier_last_error = self._classifier.error
+        self._classifier_run_count = 0
+        self._classifier_cache_hits = 0
+        if self._classifier.enabled:
+            print(
+                "[INFO] Vehicle brand classifier enabled: "
+                f"backend={self._classifier.backend} model={self._classifier.model_path}"
+            )
+        else:
+            print(f"[WARN] Vehicle brand classifier disabled: {self._classifier.error}")
 
     def _create_tracker(self):
         tracker = make_element("nvtracker", "object-tracker")
@@ -413,15 +460,24 @@ class DetectPipeline(BaseDeepStreamPipeline):
                 }
                 raw_bbox = self._scale_bbox_to_source_frame(frame_meta, bbox)
                 detection_uuid = str(uuid.uuid4())
-                track_id = (
-                    self._format_track_id(
-                        getattr(obj_meta, "object_id", None),
-                        allow_zero=self._tracker_enabled,
-                    )
-                    or detection_uuid
+                stable_track_id = self._format_track_id(
+                    getattr(obj_meta, "object_id", None),
+                    allow_zero=self._tracker_enabled,
                 )
+                track_id = stable_track_id or detection_uuid
+                cached_color = ""
+                cached_brand = ""
+                cached_brand_confidence = None
+                if stable_track_id and obj_class_id in VEHICLE_CLASS_IDS:
+                    cached, fresh = self._get_cached_brand(
+                        self._brand_cache_key(camera_id, obj_class_id, stable_track_id)
+                    )
+                    if cached and fresh:
+                        cached_color = cached.get("color", "") or ""
+                        cached_brand = cached.get("brand", "") or ""
+                        cached_brand_confidence = cached.get("confidence")
 
-                cam_result["objects"].append({
+                object_result = {
                     "class_id": obj_class_id,
                     "label": label,
                     "confidence": output_confidence,
@@ -436,13 +492,17 @@ class DetectPipeline(BaseDeepStreamPipeline):
                         "width": bbox["width"] / max(1, MUX_WIDTH),
                         "height": bbox["height"] / max(1, MUX_HEIGHT),
                     },
-                })
+                    "color": cached_color,
+                    "brand": cached_brand,
+                    "brand_confidence": cached_brand_confidence,
+                }
+                cam_result["objects"].append(object_result)
                 raw_entry = {
                     "uuid": detection_uuid,
                     "timestamp": self._format_timestamp(now),
                     "type": label,
-                    "color": "",
-                    "brand": "",
+                    "color": cached_color,
+                    "brand": cached_brand,
                     "x": raw_bbox["left"],
                     "y": raw_bbox["top"],
                     "width": raw_bbox["width"],
@@ -456,6 +516,8 @@ class DetectPipeline(BaseDeepStreamPipeline):
                     "class_id": obj_class_id,
                     "bbox": bbox,
                     "raw_entry": raw_entry,
+                    "object_result": object_result,
+                    "stable_track_id": stable_track_id,
                 })
 
                 try:
@@ -598,6 +660,88 @@ class DetectPipeline(BaseDeepStreamPipeline):
             return ""
         return str(object_id_int)
 
+    @staticmethod
+    def _brand_cache_key(cam_idx: int, class_id: int, stable_track_id: str) -> Tuple[int, int, str]:
+        return int(cam_idx), int(class_id), str(stable_track_id)
+
+    def _get_cached_brand(self, key: Tuple[int, int, str]) -> Tuple[Optional[Dict[str, Any]], bool]:
+        ttl = max(0.0, float(CLASSIFIER_CACHE_TTL_SEC))
+        now = time.time()
+        with self._brand_cache_lock:
+            cached = self._brand_cache.get(key)
+            if not cached:
+                return None, False
+            fresh = ttl <= 0.0 or (now - float(cached.get("updated_at", 0.0))) <= ttl
+            self._classifier_cache_hits += 1
+            return dict(cached), fresh
+
+    def _set_cached_brand(
+        self,
+        key: Tuple[int, int, str],
+        brand: str,
+        confidence: Optional[float],
+        color: Optional[str] = None,
+    ) -> None:
+        max_size = int(CLASSIFIER_CACHE_MAX_SIZE)
+        if max_size <= 0:
+            return
+
+        with self._brand_cache_lock:
+            previous = self._brand_cache.get(key, {})
+            stored_brand = brand or previous.get("brand", "")
+            stored_confidence = confidence if confidence is not None else previous.get("confidence")
+            stored_color = color if color is not None else previous.get("color", "")
+            self._brand_cache[key] = {
+                "brand": stored_brand,
+                "confidence": stored_confidence,
+                "color": stored_color or "",
+                "updated_at": time.time(),
+            }
+            while len(self._brand_cache) > max_size:
+                oldest_key = min(
+                    self._brand_cache,
+                    key=lambda item: float(self._brand_cache[item].get("updated_at", 0.0)),
+                )
+                self._brand_cache.pop(oldest_key, None)
+
+    def _classify_vehicle_brand(self, crop_bgr: np.ndarray) -> Tuple[str, Optional[float]]:
+        if not self._classifier.enabled:
+            return "", None
+        try:
+            brand, confidence = classify_crop(
+                self._classifier,
+                self._classifier_labels,
+                crop_bgr,
+                CLASSIFIER_INPUT_SIZE,
+                CLASSIFIER_MIN_CONFIDENCE,
+            )
+            self._classifier_run_count += 1
+            self._classifier_last_error = ""
+            return brand, confidence
+        except Exception as exc:
+            self._classifier_last_error = repr(exc)
+            print(f"[WARN] Vehicle brand classification failed: {self._classifier_last_error}")
+            return "", None
+
+    def _update_detection_attributes(
+        self,
+        raw_entry: Dict[str, Any],
+        object_result: Optional[Dict[str, Any]],
+        color: str,
+        brand: str,
+        brand_confidence: Optional[float],
+    ) -> None:
+        raw_entry["color"] = color or ""
+        raw_entry["brand"] = brand or ""
+
+        if object_result is None:
+            return
+
+        with self._det_lock:
+            object_result["color"] = color or ""
+            object_result["brand"] = brand or ""
+            object_result["brand_confidence"] = brand_confidence
+
     def _on_camera_sample(self, sink, cam_idx: int):
         sample = sink.emit("pull-sample")
         if sample is None:
@@ -647,10 +791,16 @@ class DetectPipeline(BaseDeepStreamPipeline):
             return
 
         entries = cam_data.get("entries", [])
+        classification_budget = max(0, int(CLASSIFIER_MAX_PER_CAMERA_FRAME))
         enriched = []
         for entry in entries:
             raw_entry = entry["raw_entry"]
             obj_class_id = entry["class_id"]
+            object_result = entry.get("object_result")
+            color = raw_entry.get("color", "")
+            brand = raw_entry.get("brand", "")
+            brand_confidence = object_result.get("brand_confidence") if object_result else None
+            crop = None
 
             if obj_class_id in VEHICLE_CLASS_IDS:
                 bbox = entry["bbox"]
@@ -664,7 +814,28 @@ class DetectPipeline(BaseDeepStreamPipeline):
                     color = vehicle_color_rule.detect_color(crop)
                 else:
                     color = "Unknown"
-                raw_entry["color"] = color
+
+                stable_track_id = entry.get("stable_track_id") or ""
+                cache_key = None
+                if stable_track_id:
+                    cache_key = self._brand_cache_key(cam_idx, obj_class_id, stable_track_id)
+
+                if crop is not None and obj_class_id in self._classify_class_ids and cache_key:
+                    cached, fresh = self._get_cached_brand(cache_key)
+                    if cached and fresh:
+                        brand = cached.get("brand", "")
+                        brand_confidence = cached.get("confidence")
+                    elif classification_budget > 0:
+                        brand, brand_confidence = self._classify_vehicle_brand(crop)
+                        classification_budget -= 1
+                    elif cached:
+                        brand = cached.get("brand", "")
+                        brand_confidence = cached.get("confidence")
+
+                if cache_key:
+                    self._set_cached_brand(cache_key, brand, brand_confidence, color)
+
+            self._update_detection_attributes(raw_entry, object_result, color, brand, brand_confidence)
 
             enriched.append(raw_entry)
 
@@ -700,6 +871,25 @@ class DetectPipeline(BaseDeepStreamPipeline):
 
     def get_detection_publisher_status(self):
         return self._publisher.status()
+
+    def get_classifier_status(self):
+        status = self._classifier.status()
+        with self._brand_cache_lock:
+            cache_size = len(self._brand_cache)
+            cache_hits = self._classifier_cache_hits
+        status.update({
+            "labels_count": len(self._classifier_labels),
+            "operate_on_class_ids": sorted(self._classify_class_ids),
+            "min_confidence": CLASSIFIER_MIN_CONFIDENCE,
+            "cache_ttl_sec": CLASSIFIER_CACHE_TTL_SEC,
+            "cache_max_size": CLASSIFIER_CACHE_MAX_SIZE,
+            "cache_size": cache_size,
+            "cache_hits": cache_hits,
+            "max_per_camera_frame": CLASSIFIER_MAX_PER_CAMERA_FRAME,
+            "run_count": self._classifier_run_count,
+            "last_error": self._classifier_last_error,
+        })
+        return status
 
     def start(self):
         self._publisher.start()

@@ -61,6 +61,7 @@ def health():
     }
     if pipeline and STATE["mode"] == "detect":
         payload["publisher"] = pipeline.get_detection_publisher_status()
+        payload["classifier"] = pipeline.get_classifier_status()
     return payload
 
 

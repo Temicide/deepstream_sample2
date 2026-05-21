@@ -1,0 +1,43 @@
+{
+  "yolo": {
+    "2": "car",
+    "3": "motorcycle",
+    "5": "bus",
+    "7": "truck"
+  },
+  "classifier": {
+    "0": "Acura",
+    "1": "Aston Martin",
+    "2": "Audi",
+    "3": "BMW",
+    "4": "Bentley",
+    "5": "Buick",
+    "6": "Cadillac",
+    "7": "Chevrolet",
+    "8": "Chrysler",
+    "9": "Dodge",
+    "10": "FIAT",
+    "11": "Ford",
+    "12": "GMC",
+    "13": "Honda",
+    "14": "Hyundai",
+    "15": "INFINITI",
+    "16": "Jaguar",
+    "17": "Jeep",
+    "18": "Kia",
+    "19": "Land Rover",
+    "20": "Lexus",
+    "21": "Lincoln",
+    "22": "MINI",
+    "23": "Mazda",
+    "24": "Mercedes-Benz",
+    "25": "Mitsubishi",
+    "26": "Nissan",
+    "27": "Porsche",
+    "28": "Ram",
+    "29": "Subaru",
+    "30": "Toyota",
+    "31": "Volkswagen",
+    "32": "Volvo"
+  }
+}

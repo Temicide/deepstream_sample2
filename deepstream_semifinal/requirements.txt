@@ -1,0 +1,7 @@
+numpy==1.19.4
+opencv-python==4.5.5.64
+fastapi==0.68.2
+uvicorn==0.15.0
+# Optional on Jetson Nano: install only if a compatible wheel exists for your platform.
+# The app will fall back to OpenCV DNN when onnxruntime is unavailable.
+# onnxruntime==1.10.0
