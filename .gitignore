@@ -1,0 +1,20 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+env/
+
+.agents/
+skills-lock.json
+
+# Generated DeepStream/TensorRT build outputs
+*.o
+*.so
+*.engine
+
+# Model artifacts should be downloaded/exported locally.
+models/*.onnx
+models/*.pt
+
