@@ -12,14 +12,14 @@ MAX_RTSP_SOURCES = 5
 
 # ค่าเริ่มต้นที่เหมาะกับ Jetson Nano 4GB
 MUX_WIDTH = 640
-MUX_HEIGHT = 360
+MUX_HEIGHT = 640
 MUX_BATCH_SIZE = len(RTSP_URLS)
 MUX_TIMEOUT_USEC = 40000
 
 # Tiler รวมภาพ 5 กล้องเป็น mosaic เดียว
 TILER_ROWS = 2
 TILER_COLUMNS = 3
-TILER_WIDTH = 960
+TILER_WIDTH = 1280
 TILER_HEIGHT = 720
 
 # API MJPEG setting
